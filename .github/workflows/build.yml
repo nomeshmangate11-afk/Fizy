@@ -1,0 +1,501 @@
+name: Build Fizy APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.2.1"
+
+      - name: Create Fizy Android project
+        run: |
+          mkdir -p app/src/main/java/com/fizy/assistant
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/xml
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "Fizy"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.fizy.assistant'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "com.fizy.assistant"
+                  minSdk 23
+                  targetSdk 28
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              options.encoding = 'UTF-8'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.READ_CONTACTS"/>
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+              <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+
+              <uses-feature
+                  android:name="android.hardware.camera.flash"
+                  android:required="false"/>
+
+              <application
+                  android:allowBackup="false"
+                  android:label="Fizy"
+                  android:supportsRtl="true"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".FizyAccessibilityService"
+                      android:enabled="true"
+                      android:exported="true"
+                      android:label="Fizy Mobile Control"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config"/>
+                  </service>
+
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Fizy</string>
+              <string name="accessibility_desc">Fizy ko Home, Back, Recent, Scroll, Type aur confirmed Click commands chalane deta hai.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#080C18</item>
+                  <item name="android:navigationBarColor">#080C18</item>
+                  <item name="android:colorAccent">#6C8CFF</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service
+              xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeAllMask"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/accessibility_desc"
+              android:notificationTimeout="100"/>
+          EOF
+
+          cat > app/src/main/java/com/fizy/assistant/MainActivity.java <<'EOF'
+          package com.fizy.assistant;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.database.Cursor;
+          import android.graphics.Color;
+          import android.hardware.camera2.CameraCharacteristics;
+          import android.hardware.camera2.CameraManager;
+          import android.media.AudioManager;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.AlarmClock;
+          import android.provider.ContactsContract;
+          import android.provider.MediaStore;
+          import android.provider.Settings;
+          import android.speech.RecognitionListener;
+          import android.speech.RecognizerIntent;
+          import android.speech.SpeechRecognizer;
+          import android.speech.tts.TextToSpeech;
+          import android.view.Gravity;
+          import android.view.ViewGroup;
+          import android.accessibilityservice.AccessibilityService;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Date;
+          import java.util.Locale;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+
+          public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
+
+              private static final int REQ_MIC = 10;
+              private static final int REQ_CAMERA = 11;
+              private static final int REQ_CONTACTS = 12;
+
+              private TextView status;
+              private EditText commandInput;
+              private SpeechRecognizer recognizer;
+              private TextToSpeech tts;
+              private AudioManager audioManager;
+              private String pendingCommand = "";
+              private boolean torchEnabled = false;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+                  tts = new TextToSpeech(this, this);
+
+                  createScreen();
+                  setupSpeechRecognizer();
+              }
+
+              private void createScreen() {
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setBackgroundColor(Color.rgb(8, 12, 24));
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(20), dp(32), dp(20), dp(30));
+                  scroll.addView(root);
+
+                  TextView title = new TextView(this);
+                  title.setText("FIZY");
+                  title.setTextSize(38);
+                  title.setTextColor(Color.rgb(125, 151, 255));
+                  title.setGravity(Gravity.CENTER);
+                  title.setTypeface(null, 1);
+                  root.addView(title, matchWrap());
+
+                  TextView subtitle = new TextView(this);
+                  subtitle.setText("Free Hinglish Mobile Assistant");
+                  subtitle.setTextSize(16);
+                  subtitle.setTextColor(Color.LTGRAY);
+                  subtitle.setGravity(Gravity.CENTER);
+                  subtitle.setPadding(0, 0, 0, dp(25));
+                  root.addView(subtitle, matchWrap());
+
+                  status = new TextView(this);
+                  status.setText("Ready. Mic dabao aur command bolo.");
+                  status.setTextSize(17);
+                  status.setTextColor(Color.WHITE);
+                  status.setGravity(Gravity.CENTER);
+                  status.setPadding(dp(12), dp(18), dp(12), dp(18));
+                  status.setBackgroundColor(Color.rgb(23, 31, 55));
+                  root.addView(status, matchWrap());
+
+                  Button mic = createButton("MIC DABAO AUR BOLO");
+                  mic.setOnClickListener(v -> startVoice());
+                  root.addView(mic, buttonParams());
+
+                  commandInput = new EditText(this);
+                  commandInput.setHint("Ya command type karo...");
+                  commandInput.setHintTextColor(Color.GRAY);
+                  commandInput.setTextColor(Color.WHITE);
+                  commandInput.setSingleLine(false);
+                  commandInput.setPadding(dp(15), dp(14), dp(15), dp(14));
+                  commandInput.setBackgroundColor(Color.rgb(24, 31, 50));
+                  root.addView(commandInput, matchWrap());
+
+                  Button run = createButton("COMMAND CHALAO");
+                  run.setOnClickListener(v -> {
+                      String command = commandInput.getText().toString().trim();
+                      if (!command.isEmpty()) {
+                          executeCommand(command);
+                          commandInput.setText("");
+                      }
+                  });
+                  root.addView(run, buttonParams());
+
+                  Button accessibility = createButton("MOBILE CONTROL ENABLE KARO");
+                  accessibility.setOnClickListener(v -> {
+                      speak("Accessibility settings mein Fizy Mobile Control enable karo.");
+                      startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                  });
+                  root.addView(accessibility, buttonParams());
+
+                  TextView examples = new TextView(this);
+                  examples.setText(
+                          "\nCommands:\n\n" +
+                          "• WhatsApp kholo\n" +
+                          "• Torch on karo\n" +
+                          "• Volume 50 percent karo\n" +
+                          "• 5 minute ka timer lagao\n" +
+                          "• 7:30 baje alarm lagao\n" +
+                          "• Mummy ko call lagao\n" +
+                          "• Home screen par jao\n" +
+                          "• Back jao / Recent apps kholo\n" +
+                          "• Notifications kholo\n" +
+                          "• Neeche scroll karo\n" +
+                          "• Hello Fizy likho\n" +
+                          "• Submit par click karo\n\n" +
+                          "Payment, OTP, password aur destructive commands blocked hain."
+                  );
+                  examples.setTextColor(Color.LTGRAY);
+                  examples.setTextSize(15);
+                  examples.setLineSpacing(3, 1);
+                  root.addView(examples, matchWrap());
+
+                  setContentView(scroll);
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                  );
+              }
+
+              private LinearLayout.LayoutParams buttonParams() {
+                  LinearLayout.LayoutParams p = matchWrap();
+                  p.setMargins(0, dp(14), 0, dp(5));
+                  return p;
+              }
+
+              private Button createButton(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextColor(Color.WHITE);
+                  b.setTextSize(15);
+                  b.setBackgroundColor(Color.rgb(70, 94, 190));
+                  b.setPadding(dp(8), dp(13), dp(8), dp(13));
+                  return b;
+              }
+
+              private int dp(int value) {
+                  return (int) (value * getResources().getDisplayMetrics().density);
+              }
+
+              private void setupSpeechRecognizer() {
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                      status.setText("Voice recognition available nahi hai. Typed command use karo.");
+                      return;
+                  }
+
+                  recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+                  recognizer.setRecognitionListener(new RecognitionListener() {
+                      @Override
+                      public void onReadyForSpeech(Bundle params) {
+                          status.setText("Sun rahi hoon...");
+                      }
+
+                      @Override public void onBeginningOfSpeech() {
+                          status.setText("Bolo...");
+                      }
+
+                      @Override public void onRmsChanged(float rmsdB) {}
+                      @Override public void onBufferReceived(byte[] buffer) {}
+
+                      @Override
+                      public void onEndOfSpeech() {
+                          status.setText("Samajh rahi hoon...");
+                      }
+
+                      @Override
+                      public void onError(int error) {
+                          status.setText("Voice clear nahi mili. Dobara bolo ya type karo. Error: " + error);
+                      }
+
+                      @Override
+                      public void onResults(Bundle results) {
+                          ArrayList<String> list =
+                                  results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+
+                          if (list != null && !list.isEmpty()) {
+                              executeCommand(list.get(0));
+                          } else {
+                              status.setText("Command nahi mili.");
+                          }
+                      }
+
+                      @Override public void onPartialResults(Bundle partialResults) {}
+                      @Override public void onEvent(int eventType, Bundle params) {}
+                  });
+              }
+
+              private void startVoice() {
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(
+                              new String[]{Manifest.permission.RECORD_AUDIO},
+                              REQ_MIC
+                      );
+                      return;
+                  }
+
+                  if (recognizer == null) {
+                      speak("Voice recognition available nahi hai. Command type karo.");
+                      return;
+                  }
+
+                  Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                  intent.putExtra(
+                          RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                          RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                  );
+                  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN");
+                  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN");
+                  intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+                  intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+
+                  try {
+                      recognizer.startListening(intent);
+                  } catch (Exception e) {
+                      status.setText("Mic start nahi hua: " + e.getMessage());
+                  }
+              }
+
+              private void executeCommand(String raw) {
+                  if (raw == null || raw.trim().isEmpty()) return;
+
+                  status.setText("Command: " + raw);
+
+                  String c = convertDigits(raw.toLowerCase(new Locale("hi", "IN")));
+                  c = c.replace("fizy", "")
+                          .replace("फिजी", "")
+                          .replace("फ़िज़ी", "")
+                          .trim();
+
+                  if (c.isEmpty()) {
+                      speak("Ji, bolo.");
+                      return;
+                  }
+
+                  if (has(c,
+                          "otp", "ओटीपी", "password", "पासवर्ड",
+                          "payment", "पेमेंट", "paise bhej", "पैसे भेज",
+                          "factory reset", "फैक्ट्री रीसेट",
+                          "delete all", "सब डिलीट", "send par click",
+                          "confirm payment")) {
+                      speak("Safety ke liye main OTP, password, payment ya destructive action nahi karungi.");
+                      return;
+                  }
+
+                  if (isOpenCommand(c) && openKnownApp(c)) return;
+
+                  if (has(c, "torch", "flashlight", "टॉर्च", "फ्लैशलाइट")) {
+                      handleTorch(c, raw);
+                      return;
+                  }
+
+                  if (has(c, "volume", "वॉल्यूम", "आवाज", "आवाज़")) {
+                      handleVolume(c);
+                      return;
+                  }
+
+                  if (has(c, "timer", "टाइमर")) {
+                      setTimer(c);
+                      return;
+                  }
+
+                  if (has(c, "alarm", "अलार्म")) {
+                      setAlarm(c);
+                      return;
+                  }
+
+                  if (has(c, "notification", "notifications", "नोटिफिकेशन")) {
+                      globalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS,
+                              "Notifications khol diye.");
+                      return;
+                  }
+
+                  if (has(c, "recent apps", "recent kholo", "रीसेंट", "हाल के ऐप")) {
+                      globalAction(AccessibilityService.GLOBAL_ACTION_RECENTS,
+                              "Recent apps khol diye.");
+                      return;
+                  }
+
+   
