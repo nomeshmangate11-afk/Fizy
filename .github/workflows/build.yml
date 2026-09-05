@@ -21,11 +21,14 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
       - name: Create Fizy project
         run: |
           mkdir -p app/src/main/java/com/fizy/app
-          mkdir -p app/src/main/res/layout
-          mkdir -p app/src/main/res/values
 
           cat > settings.gradle << 'EOF'
           pluginManagement {
@@ -40,13 +43,13 @@ jobs:
 
           cat > build.gradle << 'EOF'
           plugins {
-              id 'com.android.application' version '8.1.4' apply false
+              id 'com.android.application' version '8.5.2' apply false
           }
           EOF
 
           cat > gradle.properties << 'EOF'
           android.useAndroidX=true
-          org.gradle.jvmargs=-Xmx2048m
+          org.gradle.jvmargs=-Xmx3072m
           EOF
 
           cat > app/build.gradle << 'EOF'
@@ -60,9 +63,6 @@ jobs:
                   targetSdk 34
                   versionCode 1
                   versionName "1.0"
-              }
-              buildTypes {
-                  release { minifyEnabled false }
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -80,6 +80,7 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET"/>
               <application
                   android:label="Fizy"
+                  android:usesCleartextTraffic="true"
                   android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
@@ -102,6 +103,7 @@ jobs:
 
           public class MainActivity extends Activity {
               private WebView web;
+
               @Override
               protected void onCreate(Bundle b) {
                   super.onCreate(b);
@@ -113,6 +115,7 @@ jobs:
                   web.loadUrl("https://chat.qwen.ai");
                   setContentView(web);
               }
+
               @Override
               public void onBackPressed() {
                   if (web.canGoBack()) web.goBack();
@@ -122,7 +125,7 @@ jobs:
           EOF
 
       - name: Build APK
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
